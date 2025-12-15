@@ -77,12 +77,29 @@ if __name__ == '__main__':
     host = os.getenv('HOST', '0.0.0.0')
     port = int(os.getenv('PORT', '8080'))
     mdns = MdnsAdvert() if (os.getenv('MDNS_ENABLE', '1') not in ('0','false','False')) else None
+
+    # Start auto-provisioner if enabled
+    provisioner = None
+    if cfg.get('auto_provision', True):
+        from auto_provisioner import AutoProvisioner
+        provisioner = AutoProvisioner(
+            discovery=finder,
+            public_base_func=_public_base,
+            token=cfg.get('provision_token', ''),
+            interval_ms=cfg.get('interval_sec', 5) * 1000,
+            period_sec=10
+        )
+        provisioner.start()
+        print(f'[auto-provisioner] Started (will provision probes every 10 seconds)')
+
     try:
         if mdns:
             ip = mdns.start(port)
             print(f'[mDNS] Advertising http://temps-hub.local:{port} (ip {ip})')
         app.run(host=host, port=port, debug=False)
     finally:
+        if provisioner:
+            provisioner.stop()
         if mdns: mdns.stop()
         try: finder.stop()
         except Exception: pass
