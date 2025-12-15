@@ -1,4 +1,4 @@
-from dash import html, dcc, Output, Input, State, no_update
+from dash import html, dcc, Output, Input, State, no_update, ALL
 import dash_bootstrap_components as dbc
 import datetime
 
@@ -127,7 +127,7 @@ def register_devices_callbacks(app, finder, cfg):
         Output('edit-probe-id-store', 'data'),
         Output('edit-probe-id-display', 'children'),
         Output('edit-probe-name-input', 'value'),
-        Input({'type': 'edit-probe-btn', 'index': dcc.ALL}, 'n_clicks'),
+        Input({'type': 'edit-probe-btn', 'index': ALL}, 'n_clicks'),
         Input('edit-probe-cancel', 'n_clicks'),
         Input('edit-probe-save', 'n_clicks'),
         State('edit-probe-modal', 'is_open'),
