@@ -1,0 +1,228 @@
+import os, threading
+from pathlib import Path
+
+import pandas as pd
+import dash
+from dash import Dash, html, dcc, Input, Output, State, no_update
+import dash_bootstrap_components as dbc
+
+from flask import Flask
+
+# Core modules
+from core.config import Config
+from core.storage import ensure_csv
+from probe_discovery import ProbeDiscovery
+from api.routes import create_api
+
+# Components
+from components.temp_graph import GraphSection, register_callbacks
+from components.probe_panel import ProbePanel, register_probe_callbacks
+from components.setup_helper import SetupHelper, register_setup_helper_callbacks
+
+# mDNS advertise (optional)
+from contextlib import suppress
+from zeroconf import Zeroconf, ServiceInfo
+import socket
+
+BASE_DIR = Path(__file__).resolve().parent
+CSV_FILE = BASE_DIR / "temperature_log.csv"
+CONFIG_FILE = BASE_DIR / "config.json"
+
+ensure_csv(CSV_FILE)
+
+# Load / create config
+cfg = Config(CONFIG_FILE)
+
+# Discovery service
+finder = ProbeDiscovery()
+
+# Flask hosting for API + Dash
+server = Flask(__name__)
+api_bp = create_api(
+    cfg,
+    CSV_FILE,
+    finder,
+    lambda: os.getenv("PUBLIC_BASE", "http://temps-hub.local:8088"),
+    os.getenv("SERVER_TOKEN", "")
+)
+server.register_blueprint(api_bp)
+
+# Wrap Dash app
+app = Dash(__name__, external_stylesheets=[dbc.themes.CYBORG], server=server, url_base_pathname="/")
+app.title = "Temperature Monitor"
+
+app.layout = dbc.Container([
+    html.H3("🌡️ Temperature Monitor & Ingest API"),
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Logging Controls"),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Pull mode enabled"),
+                    dcc.Checklist(id="pull-enabled", options=[{"label": " Enabled", "value": "on"}],
+                                  value=["on"] if cfg.get("pull_enabled", True) else [])
+                ], width=6),
+                dbc.Col([
+                    dbc.Label("Interval (sec)"),
+                    dcc.Input(id="interval-sec", type="number", min=1, step=1, value=int(cfg.get("interval_sec", 5)))
+                ], width=6),
+            ], className="gy-2"),
+            html.Button("Save", id="save-config", className="btn btn-primary btn-sm mt-2"),
+            html.Div(id="save-status", className="mt-2 text-info")
+        ])), width=4),
+        dbc.Col(GraphSection, width=8)
+    ], className="mt-3"),
+    dbc.Row([
+        dbc.Col(ProbePanel, width=6),
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Latest Reading"),
+            html.Div(id="latest-reading", className="display-6"),
+            dcc.Interval(id="ui-refresh", interval=max(1000, int(cfg.get("interval_sec", 5))*1000), n_intervals=0)
+        ])), width=6),
+    ], className="mt-3"),
+    dbc.Row([
+        dbc.Col(SetupHelper, width=12)
+    ], className="mt-3"),
+    dbc.Alert([
+        html.Div("Device push endpoint: POST JSON to "),
+        html.Code("/api/ingest"),
+        html.Span(" with keys like "),
+        html.Code("{ 'timestamp': '2025-10-20T12:00:00', 'temperature_c': 24.5 }")
+    ], color="dark", className="mt-4"),
+    html.Div([
+        html.Small("Config API: GET/POST "), html.Code("/api/config"), html.Small(" (JSON)")
+    ], className="text-muted")
+], fluid=True)
+
+# ---- Graph + probe callbacks ----
+register_callbacks(app, CSV_FILE)
+register_probe_callbacks(app, finder, cfg)
+register_setup_helper_callbacks(app)
+
+# ---- UI callbacks for Logging Controls & Latest Reading ----
+# 1) Save Logging Controls and (if auto_provision enabled) push interval to probes
+@app.callback(
+    Output("save-status", "children"),
+    Output("pull-enabled", "value"),
+    Output("interval-sec", "value"),
+    Input("save-config", "n_clicks"),
+    State("pull-enabled", "value"),
+    State("interval-sec", "value"),
+    prevent_initial_call=True
+)
+def _save_logging(_n, pull_vals, interval_val):
+    try:
+        from auto_provision import provision_probe
+        pull = bool(pull_vals and "on" in pull_vals)
+        interval = max(1, int(interval_val or 5))
+        with cfg.lock:
+            changed = (interval != cfg.data.get("interval_sec", 5))
+            cfg.data["pull_enabled"] = pull
+            cfg.data["interval_sec"] = interval
+        cfg.save()
+
+        # If interval changed and auto_provision is ON, push to discovered probes now
+        if changed and cfg.get("auto_provision", True):
+            base = os.getenv("PUBLIC_BASE", "http://temps-hub.local:8088")
+            token = cfg.get("provision_token", os.getenv("SERVER_TOKEN", ""))
+            interval_ms = interval * 1000
+            for p in (finder.list_probes() or {}).values():
+                try:
+                    provision_probe(p.host, p.port, base, token=token, interval_ms=interval_ms)
+                except Exception:
+                    pass
+        return "✅ Saved", (["on"] if pull else []), interval
+    except Exception as e:
+        return f"❌ {e}", no_update, no_update
+
+# 2) Latest reading display
+@app.callback(
+    Output("latest-reading", "children"),
+    Input("ui-refresh", "n_intervals")
+)
+def _latest(_):
+    try:
+        df = pd.read_csv(CSV_FILE)
+        if df.empty:
+            return "(no data yet)"
+        row = df.tail(1).iloc[0]
+        # Show probe_id if present in CSV
+        probe = ""
+        if "probe_id" in df.columns and not pd.isna(row.get("probe_id", "")):
+            pid = str(row.get("probe_id"))
+            if pid:
+                probe = f"  ·  {pid}"
+        return f"{row['timestamp']} — {row['temperature_c']:.2f}°C / {row['temperature_f']:.2f}°F{probe}"
+    except Exception:
+        return "(no data yet)"
+
+# 3) Keep UI refresh interval in sync with logging interval
+@app.callback(
+    Output("ui-refresh", "interval"),
+    Input("interval-sec", "value")
+)
+def _sync_refresh_interval(v):
+    try:
+        return max(1000, int(v or 3) * 1000)
+    except Exception:
+        return 3000
+
+# -------------------- Inline mDNS (Bonjour) advertiser --------------------
+class _MdnsAdvert:
+    def __init__(self):
+        self.zeroconf = None
+        self.info = None
+
+    def _lan_ip(self) -> str:
+        ip = "127.0.0.1"
+        with suppress(Exception):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+            finally:
+                s.close()
+        return ip
+
+    def start(self, port: int, instance_name: str = "TempSensor Hub", hostname: str = "temps-hub.local."):
+        ip = self._lan_ip()
+        addr = socket.inet_aton(ip)
+        self.info = ServiceInfo(
+            type_="_http._tcp.local.",
+            name=f"{instance_name}._http._tcp.local.",
+            addresses=[addr],
+            port=port,
+            properties={},
+            server=hostname,
+        )
+        self.zeroconf = Zeroconf()
+        self.zeroconf.register_service(self.info)
+        return ip
+
+    def stop(self):
+        with suppress(Exception):
+            if self.zeroconf and self.info:
+                self.zeroconf.unregister_service(self.info)
+        with suppress(Exception):
+            if self.zeroconf:
+                self.zeroconf.close()
+        self.zeroconf = None
+        self.info = None
+
+
+if __name__ == "__main__":
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8088"))
+
+    mdns = _MdnsAdvert() if (os.getenv("MDNS_ENABLE", "1") not in ("0","false","False")) else None
+    try:
+        if mdns:
+            try:
+                ip = mdns.start(port)
+                print(f"[mDNS] Advertising http://temps-hub.local:{port} (ip {ip})")
+            except Exception as e:
+                print(f"[mDNS] advertise failed: {e}")
+        app.run(host=host, port=port, debug=False)
+    finally:
+        if mdns:
+            mdns.stop()

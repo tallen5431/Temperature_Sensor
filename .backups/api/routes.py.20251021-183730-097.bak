@@ -1,0 +1,153 @@
+# api/routes.py
+from __future__ import annotations
+from flask import Blueprint, request, jsonify
+from pathlib import Path
+import datetime
+
+from core.config import Config
+from core.storage import append_row, normalize_payload
+from auto_provision import provision_probe
+from probe_discovery import ProbeDiscovery
+
+def create_api(cfg: Config, csv_file: Path, discovery: ProbeDiscovery,
+               server_base_fn, server_token: str = "") -> Blueprint:
+    """
+    server_base_fn(): returns like 'http://<ip>:8088'
+    """
+    bp = Blueprint("api", __name__)
+
+    @bp.get("/api/config")
+    def get_config():
+        with cfg.lock:
+            return jsonify(dict(cfg.data))
+
+    @bp.post("/api/config")
+    def set_config():
+        try:
+            body = request.get_json(force=True) or {}
+            with cfg.lock:
+                if "interval_sec" in body:
+                    cfg.data["interval_sec"] = max(1, int(body["interval_sec"]))
+                if "pull_enabled" in body:
+                    cfg.data["pull_enabled"] = bool(body["pull_enabled"])
+                if "auto_provision" in body:
+                    cfg.data["auto_provision"] = bool(body["auto_provision"])
+            cfg.save()
+            return jsonify({"ok": True, **cfg.data})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+    @bp.get("/api/probes")
+    def list_probes():
+        try:
+            return jsonify({
+                "ok": True,
+                "probes": [{
+                    "name": p.name,
+                    "host": p.host,
+                    "ip": p.ip,
+                    "port": p.port,
+                    "properties": dict(p.properties),
+                    "last_seen": p.last_seen,
+                } for p in discovery.list_probes().values()]
+            })
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+
+    @bp.post("/api/provision")
+    def provision():
+        try:
+            body = request.get_json(force=True) or {}
+            host = (body.get("host") or "").strip()
+            token = (body.get("token") or server_token or "").strip()
+            interval_ms = int(body.get("interval_ms") or (cfg.get("interval_sec", 5) * 1000))
+            port = int(body.get("port") or 80)
+
+            base = server_base_fn()
+            targets = []
+            if host:
+                targets.append((host, port))
+            else:
+                for p in discovery.list_probes().values():
+                    targets.append((p.host, p.port))
+
+            ok = 0
+            for h, prt in targets:
+                if provision_probe(h, prt, base, token=token, interval_ms=interval_ms):
+                    ok += 1
+
+            return jsonify({"ok": True, "provisioned": ok, "total": len(targets), "server_base": base})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+    def _check_auth():
+        if server_token and request.headers.get("X-Token", "") != server_token:
+            return False
+        return True
+
+    @bp.post("/api/ingest")
+    def ingest():
+        try:
+            if not _check_auth():
+                return jsonify({"ok": False, "error": "unauthorized"}), 401
+            payload = {}
+            if request.data:
+                try:
+                    payload = request.get_json(force=True) or {}
+                except Exception:
+                    text = request.data.decode(errors="ignore").strip()
+                    if text and ("," in text or "timestamp_ms" in text):
+                        return jsonify({"ok": False, "error": "send CSV to /api/ingest/csv or JSON here"}), 415
+                    raise
+            ts, t_c, t_f = normalize_payload(payload)
+            append_row(csv_file, ts, t_c, t_f)
+            return jsonify({"ok": True, "timestamp": ts, "temperature_c": t_c, "temperature_f": t_f})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+    @bp.post("/api/ingest/csv")
+    def ingest_csv():
+        try:
+            if not _check_auth():
+                return jsonify({"ok": False, "error": "unauthorized"}), 401
+            text = (request.data or b"").decode(errors="ignore").strip()
+            if not text:
+                return jsonify({"ok": False, "error": "empty body"}), 400
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            parts = [p.strip() for p in lines[-1].split(",")]
+            if len(parts) == 2:
+                t_c = float(parts[0]); t_f = float(parts[1])
+            elif len(parts) >= 3:
+                t_c = float(parts[1]); t_f = float(parts[2])
+            else:
+                return jsonify({"ok": False, "error": "csv format not recognized"}), 400
+            now = datetime.datetime.now().isoformat(timespec="seconds")
+            append_row(csv_file, now, t_c, t_f)
+            return jsonify({"ok": True, "timestamp": now, "temperature_c": t_c, "temperature_f": t_f})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+    @bp.get("/api/ingest")
+    def ingest_query():
+        try:
+            if not _check_auth():
+                return jsonify({"ok": False, "error": "unauthorized"}), 401
+            args = request.args or {}
+            payload = {}
+            if "temperature_c" in args:
+                payload["temperature_c"] = float(args.get("temperature_c"))
+            if "temperature_f" in args:
+                payload["temperature_f"] = float(args.get("temperature_f"))
+            if not payload:
+                return jsonify({"ok": False, "error": "provide temperature_c or temperature_f"}), 400
+            ts, t_c, t_f = normalize_payload(payload)
+            append_row(csv_file, ts, t_c, t_f)
+            return jsonify({"ok": True, "timestamp": ts, "temperature_c": t_c, "temperature_f": t_f})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+    @bp.get("/health")
+    def health():
+        return {"ok": True, "time": datetime.datetime.now().isoformat()}
+
+    return bp

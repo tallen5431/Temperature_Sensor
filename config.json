@@ -1,0 +1,6 @@
+{
+  "interval_sec": 5,
+  "pull_enabled": true,
+  "auto_provision": true,
+  "provision_token": ""
+}

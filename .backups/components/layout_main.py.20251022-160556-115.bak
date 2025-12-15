@@ -1,0 +1,59 @@
+from dash import html, dcc
+import dash_bootstrap_components as dbc
+
+from components.temp_graph import GraphSection
+from components.probe_panel import ProbePanel
+from components.setup_helper import SetupHelper
+
+NAVBAR = dbc.Navbar(
+    dbc.Container([
+        html.A(
+            dbc.Row([
+                dbc.Col(html.Img(src='/assets/icon.png', height='30px')),
+                dbc.Col(dbc.NavbarBrand('Temperature Hub', className='ms-2 fw-bold'))
+            ], align='center', className='g-0'),
+            href='/'
+        ),
+        dbc.Nav([
+            dbc.NavItem(dbc.NavLink('Dashboard', href='/', active='exact')),
+            dbc.NavItem(dbc.NavLink('Devices', href='/devices', active='exact')),
+            dbc.NavItem(dbc.NavLink('Settings', href='/settings', active='exact')),
+            dbc.NavItem(dbc.NavLink('Help', href='/help', active='exact')),
+        ], className='ms-auto', navbar=True)
+    ]),
+    color='dark',
+    dark=True,
+    sticky='top'
+)
+
+LAYOUT = html.Div([
+    dcc.Location(id='url', refresh=False),
+    NAVBAR,
+    html.Div(id='page-content', className='p-4')
+])
+
+def serve_page(pathname):
+    if pathname == '/devices':
+        return html.Div([
+            html.H4('Connected Probes'),
+            ProbePanel
+        ])
+    elif pathname == '/settings':
+        return html.Div([
+            html.H4('Settings & Configuration'),
+            SetupHelper
+        ])
+    elif pathname == '/help':
+        return html.Div([
+            html.H4('Help & Support'),
+            html.P('Use this hub to view and log data from your ESP32 temperature probes.'),
+            html.P('Endpoints:'),
+            html.Code('/api/config, /api/ingest, /api/probes'),
+            html.Br(),
+            html.A('📘 Documentation', href='https://github.com/', target='_blank')
+        ])
+    else:
+        return html.Div([
+            html.H4('Dashboard Overview'),
+            GraphSection
+        ])

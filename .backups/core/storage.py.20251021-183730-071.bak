@@ -1,0 +1,37 @@
+# core/storage.py
+from __future__ import annotations
+from pathlib import Path
+import pandas as pd
+import datetime
+
+def ensure_csv(csv_file: Path) -> None:
+    if not csv_file.exists():
+        pd.DataFrame(columns=["timestamp","temperature_c","temperature_f"]).to_csv(csv_file, index=False)
+
+def append_row(csv_file: Path, ts: str, t_c: float, t_f: float) -> None:
+    df = pd.DataFrame([[ts, t_c, t_f]], columns=["timestamp","temperature_c","temperature_f"])
+    df.to_csv(csv_file, mode="a", header=False, index=False)
+
+def normalize_payload(payload: dict):
+    """
+    Accepts keys like temperature_c/temp_c/t_c or temperature_f/temp_f/t_f.
+    Returns (timestamp_iso, celsius, fahrenheit)
+    """
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    ts = payload.get("timestamp") or payload.get("ts") or now
+
+    c_keys = ["temperature_c","temp_c","t_c","c"]
+    f_keys = ["temperature_f","temp_f","t_f","f"]
+
+    t_c = next((float(payload[k]) for k in c_keys if k in payload), None)
+    t_f = next((float(payload[k]) for k in f_keys if k in payload), None)
+
+    if t_c is None and t_f is None:
+        raise ValueError("No temperature value found")
+
+    if t_c is None:  # compute from F
+        t_c = (t_f - 32.0) * 5.0 / 9.0
+    if t_f is None:  # compute from C
+        t_f = (t_c * 9.0 / 5.0) + 32.0
+
+    return ts, float(t_c), float(t_f)

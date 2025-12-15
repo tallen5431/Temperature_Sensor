@@ -1,0 +1,184 @@
+# app.py
+import os
+from pathlib import Path
+import socket
+
+import dash
+from dash import Dash, html, dcc
+import dash_bootstrap_components as dbc
+
+from components.temp_graph import GraphSection, register_callbacks
+from components.probe_panel import ProbePanel, register_probe_callbacks
+from components.setup_helper import SetupHelper, register_setup_helper_callbacks
+
+from core.config import Config
+from core.storage import ensure_csv
+from core.logger import PullLogger
+from core.mdns_advert import MdnsAdvert
+
+from probe_discovery import ProbeDiscovery
+from api.routes import create_api
+
+# ---------- Paths & env ----------
+BASE_DIR = Path(__file__).resolve().parent
+CSV_FILE = BASE_DIR / "temperature_log.csv"
+CONFIG_FILE = BASE_DIR / "config.json"
+ensure_csv(CSV_FILE)
+
+ESP32_URL = os.getenv("ESP32_URL", "http://192.168.1.202/")
+SERVER_TOKEN = os.getenv("SERVER_TOKEN", "")
+MDNS_ENABLE = os.getenv("MDNS_ENABLE", "1") not in ("0","false","False")
+
+# ---------- Shared services ----------
+cfg = Config(CONFIG_FILE)
+puller = PullLogger(cfg, CSV_FILE, ESP32_URL)
+
+_discovery = ProbeDiscovery()
+
+def _lan_ip() -> str:
+    ip = "127.0.0.1"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        pass
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+    return ip
+
+def _server_base(port: int) -> str:
+    return f"http://{_lan_ip()}:{port}"
+
+# ---------- Dash ----------
+app = Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
+server = app.server
+app.title = "Temperature Monitor"
+
+app.layout = dbc.Container([
+    html.H3("🌡️ Temperature Monitor & Ingest API"),
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Logging Controls"),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Pull mode enabled"),
+                    dcc.Checklist(
+                        id="pull-enabled",
+                        options=[{"label": " Enabled", "value": "on"}],
+                        value=["on"] if cfg.get("pull_enabled", True) else [])
+                ], width=6),
+                dbc.Col([
+                    dbc.Label("Interval (sec)"),
+                    dcc.Input(id="interval-sec", type="number", min=1, step=1,
+                              value=int(cfg.get("interval_sec", 5)))
+                ], width=6),
+            ], className="gy-2"),
+            html.Button("Save", id="save-config", className="btn btn-primary btn-sm mt-2"),
+            html.Div(id="save-status", className="mt-2 text-info")
+        ])), width=4),
+        dbc.Col(GraphSection, width=8)
+    ], className="mt-3"),
+
+    dbc.Row([
+        dbc.Col(ProbePanel, width=6),
+        dbc.Col(SetupHelper, width=6),
+    ], className="mt-3"),
+
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H5("Latest Reading"),
+            html.Div(id="latest-reading", className="display-6"),
+            dcc.Interval(id="ui-refresh", interval=3000, n_intervals=0)
+        ])), width=12)
+    ], className="mt-3"),
+
+    dbc.Alert([
+        html.Div("Device push endpoint: POST JSON to "),
+        html.Code("/api/ingest"),
+        html.Span(" with keys like "),
+        html.Code("{ 'timestamp': '2025-10-20T12:00:00', 'temperature_c': 24.5 }")
+    ], color="dark", className="mt-4"),
+    html.Div([
+        html.Small("Config API: GET/POST "), html.Code("/api/config"), html.Small(" (JSON)")
+    ], className="text-muted")
+], fluid=True)
+
+# ---------- Wire callbacks ----------
+from dash import Input, Output, State, no_update
+import pandas as pd
+
+@app.callback(
+    Output("save-status", "children"),
+    Output("pull-enabled", "value"),
+    Output("interval-sec", "value"),
+    Input("save-config", "n_clicks"),
+    State("pull-enabled", "value"),
+    State("interval-sec", "value"),
+    prevent_initial_call=True
+)
+def save_config(n, pull_vals, interval_val):
+    try:
+        pull = bool(pull_vals and "on" in pull_vals)
+        interval = max(1, int(interval_val or 5))
+        cfg.set("pull_enabled", pull)
+        cfg.set("interval_sec", interval)
+        return "✅ Saved", (["on"] if pull else []), interval
+    except Exception as e:
+        return f"❌ {e}", no_update, no_update
+
+@app.callback(
+    Output("latest-reading", "children"),
+    Input("ui-refresh", "n_intervals")
+)
+def show_latest(_):
+    try:
+        df = pd.read_csv(CSV_FILE)
+        if df.empty:
+            return "(no data yet)"
+        row = df.tail(1).iloc[0]
+        return f"{row['timestamp']} — {row['temperature_c']:.2f}°C / {row['temperature_f']:.2f}°F"
+    except Exception:
+        return "(no data yet)"
+
+# Graph + probe panels
+register_callbacks(app, CSV_FILE)
+register_probe_callbacks(app, _discovery, _server_base(int(os.getenv("PORT","8088"))))
+register_setup_helper_callbacks(app)  # <= This is the spot (already present in your snapshot)
+
+# ---------- REST (Blueprint) ----------
+bp = create_api(
+    cfg=cfg,
+    csv_file=CSV_FILE,
+    discovery=_discovery,
+    server_base_fn=lambda: _server_base(int(os.getenv("PORT","8088"))),
+    server_token=os.getenv("SERVER_TOKEN",""),
+)
+server.register_blueprint(bp)
+
+# ---------- Run ----------
+if __name__ == "__main__":
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8088"))
+
+    # background services
+    puller.start()
+    _discovery.start()
+
+    mdns = MdnsAdvert() if (os.getenv("MDNS_ENABLE","1") not in ("0","false","False")) else None
+    try:
+        if mdns:
+            try:
+                ip = mdns.start(port)
+                print(f"[mDNS] Advertising http://temps-hub.local:{port} (ip {ip})")
+            except Exception as e:
+                print(f"[mDNS] advertise failed: {e}")
+        app.run(host=host, port=port, debug=False)
+    finally:
+        puller.stop()
+        _discovery.stop()
+        if mdns:
+            mdns.stop()

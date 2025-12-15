@@ -1,0 +1,68 @@
+## 📘 **thermo_logger.py (CSV-compatible version)**
+
+```python
+import csv
+import time
+import requests
+import datetime
+
+# --- Configuration ---
+ESP32_URL = "http://192.168.1.202/"   # Your ESP32 address (port 80 by default)
+CSV_FILE = "temperature_log.csv"
+INTERVAL = 5  # seconds between reads
+
+def read_temp():
+    """Fetch CSV-style data from ESP32 and return (timestamp, °C, °F)."""
+    try:
+        r = requests.get(ESP32_URL, timeout=3)
+        r.raise_for_status()
+        text = r.text.strip().splitlines()
+
+        # Skip header line and parse the second line
+        if len(text) < 2:
+            print(f"[WARN] No valid data received: {text}")
+            return None
+
+        # Example: timestamp_ms,temperature_C,temperature_F
+        parts = text[1].split(",")
+        if len(parts) < 3:
+            print(f"[WARN] Unexpected format: {parts}")
+            return None
+
+        timestamp_ms = int(parts[0])
+        t_c = float(parts[1])
+        t_f = float(parts[2])
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+
+        return ts, t_c, t_f
+    except Exception as e:
+        print(f"[WARN] Failed to read sensor: {e}")
+        return None
+
+def ensure_csv():
+    """Create the CSV file with headers if it doesn't exist."""
+    try:
+        with open(CSV_FILE, "x", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["timestamp", "temperature_c", "temperature_f"])
+    except FileExistsError:
+        pass
+
+def log_data(row):
+    with open(CSV_FILE, "a", newline="") as f:
+        csv.writer(f).writerow(row)
+
+def main():
+    ensure_csv()
+    print(f"🌡️  Logging temperatures from {ESP32_URL}")
+    print(f"📁  Saving to {CSV_FILE}")
+    while True:
+        reading = read_temp()
+        if reading:
+            log_data(reading)
+            ts, c, f = reading
+            print(f"[{ts}]  {c:.2f} °C / {f:.2f} °F")
+        time.sleep(INTERVAL)
+
+if __name__ == "__main__":
+    main()

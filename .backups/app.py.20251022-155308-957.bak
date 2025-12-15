@@ -1,0 +1,21 @@
+### FINAL SECTION CLEANUP ###
+if __name__ == "__main__":
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8088"))
+
+    mdns = MdnsAdvert() if (os.getenv("MDNS_ENABLE", "1") not in ("0", "false", "False")) else None
+    try:
+        if mdns:
+            try:
+                ip = mdns.start(port)
+                print(f"[mDNS] Advertising http://temps-hub.local:{port} (ip {ip})")
+            except Exception as e:
+                print(f"[mDNS] advertise failed: {e}")
+        app.run(host=host, port=port, debug=False)
+    finally:
+        if mdns:
+            mdns.stop()
+        try:
+            finder.stop()
+        except Exception:
+            pass

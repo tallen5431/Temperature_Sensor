@@ -1,0 +1,215 @@
+import dash
+from dash import html, dcc
+from dash.dependencies import Input, Output, State
+import pandas as pd
+import requests, datetime, os
+import dash_bootstrap_components as dbc
+import plotly.graph_objects as go
+
+ESP32_URL = os.getenv("ESP32_URL", "http://192.168.1.202/")
+CSV_FILE = "temperature_log.csv"
+DEFAULT_INTERVAL = 5000  # ms
+DEFAULT_VIEW_MIN = 10    # minutes
+
+if not os.path.exists(CSV_FILE):
+    pd.DataFrame(columns=["timestamp", "temperature_c", "temperature_f"]).to_csv(CSV_FILE, index=False)
+
+def fetch_temp():
+    try:
+        r = requests.get(ESP32_URL, timeout=3)
+        r.raise_for_status()
+        lines = r.text.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        parts = lines[1].split(',')
+        if len(parts) < 3:
+            return None
+        t_c = float(parts[1])
+        t_f = float(parts[2])
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        return ts, t_c, t_f
+    except Exception as e:
+        print(f"[WARN] fetch_temp failed: {e}")
+        return None
+
+def append_csv(reading):
+    try:
+        ts, c, f = reading
+        with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f_out:
+            f_out.write(f"{ts},{c:.2f},{f:.2f}\n")
+            f_out.flush()
+    except Exception as e:
+        print(f"[WARN] Failed to append CSV: {e}")
+
+def read_csv(view_minutes: int):
+    try:
+        df = pd.read_csv(CSV_FILE)
+        if df.empty:
+            return pd.DataFrame(columns=["timestamp", "temperature_c", "temperature_f"])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+        cutoff = datetime.datetime.now() - datetime.timedelta(minutes=view_minutes)
+        return df[df['timestamp'] > cutoff]
+    except Exception:
+        return pd.DataFrame(columns=["timestamp", "temperature_c", "temperature_f"])
+
+app = dash.Dash(__name__, title="ESP32 Temperature Monitor", external_stylesheets=[dbc.themes.CYBORG])
+server = app.server
+
+app.layout = dbc.Container([
+    dbc.Row(dbc.Col(html.H3("🌡️ ESP32 Temperature Dashboard", className="text-center my-3"))),
+
+    dbc.Row([
+        dbc.Col(html.Div(id="status-indicator"), width=2),
+        dbc.Col(html.Div(id="live-temp", className="fw-bold fs-5"), width=10)
+    ], align="center", className="mb-2"),
+
+    dbc.Row([
+        dbc.Col(dbc.Card([
+            dbc.CardHeader("Current Temperature"),
+            dbc.CardBody([
+                html.H2(id="gauge-temp", className="text-center display-6"),
+                html.Div(id="temp-note", className="text-center small text-muted")
+            ])
+        ], className="shadow-sm bg-dark text-light"), width=12)
+    ], className="mb-3"),
+
+    dbc.Row(dbc.Col(dcc.Graph(
+        id="temp-graph",
+        style={"borderRadius": "10px", "boxShadow": "0 0 15px rgba(0,0,0,0.3)"}
+    ), width=12)),
+
+    dbc.Row([
+        dbc.Col([
+            html.Label("Refresh Interval (seconds)"),
+            dcc.Slider(
+                id="interval-slider",
+                min=2, max=10, step=1, value=DEFAULT_INTERVAL / 1000,
+                marks={i: str(i) for i in range(2, 11)}
+            ),
+            html.Br(),
+            html.Label("View Range"),
+            dcc.Dropdown(
+                id="view-range",
+                options=[
+                    {"label": "Last 10 min", "value": 10},
+                    {"label": "Last 1 hr", "value": 60},
+                    {"label": "Last 24 hrs", "value": 1440},
+                ],
+                value=DEFAULT_VIEW_MIN,
+                clearable=False,
+                style={"width": "220px"}
+            )
+        ], width=8),
+        dbc.Col([
+            html.Br(),
+            html.A("⬇️ Download CSV", href="/download", target="_blank",
+                   className="btn btn-secondary w-100 mb-2"),
+            html.Button("💾 Save Now", id="save-now", className="btn btn-primary w-100")
+        ], width=4)
+    ], className="my-3"),
+
+    dcc.Interval(id="interval", interval=DEFAULT_INTERVAL, n_intervals=0)
+], fluid=True)
+
+@app.server.route('/download')
+def serve_csv():
+    if not os.path.exists(CSV_FILE):
+        return "No data yet", 404
+    with open(CSV_FILE, 'r', encoding='utf-8') as f:
+        data = f.read()
+    return data, 200, {'Content-Type': 'text/csv', 'Content-Disposition': 'inline; filename=temperature_log.csv'}
+
+@app.callback(
+    Output("temp-graph", "figure"),
+    Output("live-temp", "children"),
+    Output("status-indicator", "children"),
+    Output("gauge-temp", "children"),
+    Output("temp-note", "children"),
+    Input("interval", "n_intervals"),
+    Input("save-now", "n_clicks"),
+    Input("view-range", "value"),
+    State("interval-slider", "value")
+)
+def update_graph(n, save_clicks, view_minutes, slider_val):
+    # fetch + log
+    reading = fetch_temp()
+    status_icon = html.Span("🟢 Online", style={"color": "lime"}) if reading else html.Span("🔴 Offline", style={"color": "red"})
+    if reading:
+        append_csv(reading)
+
+    # load recent window
+    df = read_csv(view_minutes)
+    if df.empty:
+        return go.Figure(), "Waiting for sensor data...", status_icon, "--", "No data yet."
+
+    # smoothing
+    df['temperature_c_smooth'] = df['temperature_c'].rolling(3, min_periods=1).mean()
+    df['temperature_f_smooth'] = df['temperature_f'].rolling(3, min_periods=1).mean()
+
+    # build figure
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df['timestamp'], y=df['temperature_c_smooth'],
+        mode='lines+markers', name='Temp °C',
+        line=dict(color='#FFA500', width=3, shape='spline'),
+        fill='tozeroy', fillcolor='rgba(255,165,0,0.15)',
+        hovertemplate="%{x|%H:%M:%S}<br><b>%{y:.2f} °C</b><extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=df['timestamp'], y=df['temperature_f_smooth'],
+        mode='lines', name='Temp °F',
+        line=dict(color='#00BFFF', width=2, shape='spline'),
+        yaxis='y2',
+        hovertemplate="%{x|%H:%M:%S}<br><b>%{y:.2f} °F</b><extra></extra>"
+    ))
+
+    # force aligned zero points (0°C / 32°F) with headroom
+    y1_max = max(40, float(df['temperature_c'].max()) + 5.0)
+    y2_max = max(100, float(df['temperature_f'].max()) + 10.0)
+
+    fig.update_layout(
+        template='plotly_dark',
+        xaxis=dict(title='Time', showgrid=True, gridcolor='rgba(255,255,255,0.1)'),
+        yaxis=dict(
+            title='°C',
+            showgrid=True, gridcolor='rgba(255,255,255,0.1)',
+            zeroline=True, zerolinecolor='rgba(255,255,255,0.3)',
+            range=[0, y1_max]
+        ),
+        yaxis2=dict(
+            title='°F',
+            overlaying='y', side='right',
+            showgrid=False,
+            zeroline=True, zerolinecolor='rgba(255,255,255,0.3)',
+            range=[32, y2_max]
+        ),
+        legend=dict(orientation='h', y=-0.25, x=0.25, font=dict(size=12)),
+        height=520,
+        margin=dict(l=60, r=60, t=50, b=60),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(10,10,10,0.9)',
+        title=dict(text='Temperature Readings (Live)', x=0.5, xanchor='center', font=dict(size=22))
+    )
+
+    # gauge + trend
+    last = df.iloc[-1]
+    c, f = float(last['temperature_c']), float(last['temperature_f'])
+    color = '#00BFFF' if c < 15 else ('#FFD700' if c < 25 else '#FF6347')
+    note = 'Cool' if c < 15 else ('Comfortable' if c < 25 else 'Warm')
+
+    if len(df) > 1:
+        trend = float(df['temperature_c'].iloc[-1]) - float(df['temperature_c'].iloc[-2])
+        arrow = "🔺" if trend > 0 else ("🔻" if trend < 0 else "⏺️")
+    else:
+        arrow = "⏺️"
+
+    live_text = f"{arrow} Last reading: {last['timestamp']} — {c:.2f} °C / {f:.2f} °F"
+    gauge_text = html.Span(f"{c:.1f} °C  |  {f:.1f} °F", style={"color": color, "fontWeight": "bold"})
+
+    return fig, live_text, status_icon, gauge_text, note
+
+if __name__ == '__main__':
+    host = os.getenv('HOST', '0.0.0.0')
+    port = int(os.getenv('PORT', '8088'))
+    print(f"[INFO] Dash server running at http://{host}:{port}")
+    app.run(host=host, port=port, debug=False)
