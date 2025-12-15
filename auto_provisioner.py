@@ -26,16 +26,22 @@ class AutoProvisioner(threading.Thread):
                 base = (self.public_base_func() or "").rstrip("/")
                 if base:
                     for p in self.discovery.list_probes().values():
-                        host = getattr(p, "ip", None) or getattr(p, "host", None) or ""
+                        # Handle both dict and object-style probes
+                        if isinstance(p, dict):
+                            host = p.get('ip') or p.get('host') or ''
+                            port = int(p.get('port', 80) or 80)
+                        else:
+                            host = getattr(p, "ip", None) or getattr(p, "host", None) or ""
+                            port = int(getattr(p, "port", 80) or 80)
+
                         host = host.rstrip('.')
-                        port = int(getattr(p, "port", 80) or 80)
                         if host:
                             try:
                                 # Provision to <base>/api/ingest using probe IP/host
                                 provision_probe(host, port, base, token=self.token, interval_ms=self.interval_ms)
-                            except Exception:
+                            except Exception as e:
                                 # best-effort; we'll retry next cycle
-                                pass
-            except Exception:
-                pass
+                                print(f"[auto_provisioner] Failed to provision {host}:{port}: {e}")
+            except Exception as e:
+                print(f"[auto_provisioner] Error in provisioning cycle: {e}")
             time.sleep(self.period_sec)

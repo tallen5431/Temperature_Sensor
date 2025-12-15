@@ -20,12 +20,14 @@ def register_devices_callbacks(app, finder):
                 if isinstance(p, dict):
                     props = p.get('properties', {}) or {}
                     name = p.get('name') or props.get('name') or props.get('id') or p.get('id') or 'Unknown'
+                    probe_id = props.get('id') or p.get('probe_id') or p.get('id')
                     ip = p.get('ip') or p.get('host') or 'N/A'
                     port = p.get('port', 80)
                     last = p.get('last_seen')
                 else:
                     props = getattr(p, 'properties', {}) or {}
                     name = getattr(p, 'name', None) or getattr(p, 'id', None) or props.get('name') or props.get('id') or 'Unknown'
+                    probe_id = props.get('id') or getattr(p, 'probe_id', None) or getattr(p, 'id', None)
                     ip = getattr(p, 'ip', None) or getattr(p, 'host', None) or 'N/A'
                     port = getattr(p, 'port', 80)
                     last = getattr(p, 'last_seen', None)
@@ -51,8 +53,14 @@ def register_devices_callbacks(app, finder):
                     except Exception:
                         pass
 
+                # Build display elements
+                title_elements = [html.H6(name, className='fw-bold mb-1')]
+                # Show probe_id if it differs from name (fixes ID mismatch issue)
+                if probe_id and probe_id != name:
+                    title_elements.append(html.Small(f'ID: {probe_id}', className='text-info d-block mb-1'))
+
                 card = dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H6(name, className='fw-bold mb-1'),
+                    *title_elements,
                     html.Small(f'{ip}:{port}', className='text-muted'),
                     html.Div(html.Span(f'● {delta or "Unknown"}', className=f'status-dot text-{status_color} fw-bold mt-2'))
                 ]), className='h-100 probe-card'), width=12, lg=4, md=6)
@@ -61,5 +69,8 @@ def register_devices_callbacks(app, finder):
             if not cards:
                 return [dbc.Alert('No probes discovered yet.', color='secondary')]
             return cards
-        except Exception:
-            return [dbc.Alert('Discovery service unavailable.', color='danger')]
+        except Exception as e:
+            import traceback
+            error_msg = f'Discovery service error: {str(e)}'
+            print(f'[devices_panel] {error_msg}\n{traceback.format_exc()}')
+            return [dbc.Alert(error_msg, color='danger')]

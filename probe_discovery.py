@@ -28,8 +28,20 @@ class ProbeDiscovery:
 
     def _resolve_ip(self, host: str) -> Optional[str]:
         try:
-            # Resolve mDNS host (works if the OS has mDNS or we’re running Zeroconf)
-            return socket.gethostbyname(host.rstrip("."))
+            # Resolve mDNS host with timeout to prevent hanging
+            # socket.gethostbyname doesn't support timeout directly, so we use socket.getaddrinfo
+            import socket as sock_module
+            host_clean = host.rstrip(".")
+            # Set default timeout for socket operations (3 seconds)
+            old_timeout = sock_module.getdefaulttimeout()
+            try:
+                sock_module.setdefaulttimeout(3.0)
+                result = sock_module.getaddrinfo(host_clean, None, sock_module.AF_INET)
+                if result and len(result) > 0:
+                    return result[0][4][0]  # Extract IP address from first result
+                return None
+            finally:
+                sock_module.setdefaulttimeout(old_timeout)
         except Exception:
             return None
 
@@ -96,11 +108,8 @@ class ProbeDiscovery:
         if stype is None and len(args) >= 2: stype = args[1]
         if name is None and len(args) >= 3: name = args[2]
         if state_change is None and len(args) >= 4: state_change = args[3]
-        try:
-            return self._handle(zc, stype, name, state_change)
-        except TypeError:
-            # Legacy _handle(stype, name, state_change)
-            return self._handle(stype, name, state_change)
+        # Call _handle with all 4 required parameters
+        return self._handle(zc, stype, name, state_change)
 
     def start(self):
         if self._browser:
