@@ -182,10 +182,11 @@ def register_dashboard_callbacks(app, finder, cfg):
         Output('unit-fahrenheit', 'outline'),
         Output('temp-unit-store', 'data'),
         Input('unit-celsius', 'n_clicks'),
-        Input('unit-fahrenheit', 'n_clicks')
+        Input('unit-fahrenheit', 'n_clicks'),
+        prevent_initial_call=True
     )
     def toggle_unit(celsius_clicks, fahrenheit_clicks):
-        from dash.callback_context import callback_context
+        from dash import callback_context
         if not callback_context.triggered:
             return False, True, 'celsius'
 
