@@ -53,4 +53,4 @@ LAYOUT = html.Div([
 def register_all_callbacks(app, finder, cfg):
     from components.dashboard_view import register_dashboard_callbacks
     register_dashboard_callbacks(app, finder, cfg)
-    register_devices_callbacks(app, finder)
+    register_devices_callbacks(app, finder, cfg)

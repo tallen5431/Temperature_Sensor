@@ -8,13 +8,14 @@ DevicesLayout = html.Div([
     html.Div(id='device-grid', className='row g-3')
 ])
 
-def register_devices_callbacks(app, finder):
+def register_devices_callbacks(app, finder, cfg):
     @app.callback(Output('device-grid', 'children'), Input('device-refresh', 'n_intervals'))
     def update_devices(_):
         try:
             probes = (finder.list_probes() or {}).values()
             cards = []
             now = datetime.datetime.now()
+            probe_names = cfg.get('probe_names', {})
             for p in probes:
                 # Handle both dicts and object-style probes
                 if isinstance(p, dict):
@@ -53,11 +54,21 @@ def register_devices_callbacks(app, finder):
                     except Exception:
                         pass
 
-                # Build display elements
-                title_elements = [html.H6(name, className='fw-bold mb-1')]
-                # Show probe_id if it differs from name (fixes ID mismatch issue)
-                if probe_id and probe_id != name:
-                    title_elements.append(html.Small(f'ID: {probe_id}', className='text-info d-block mb-1'))
+                # Build display elements with friendly names
+                friendly_name = probe_names.get(probe_id, None) if probe_id else None
+                if friendly_name:
+                    # Show friendly name as primary, with probe_id as secondary
+                    title_elements = [html.H6(friendly_name, className='fw-bold mb-1')]
+                    if probe_id != name:
+                        title_elements.append(html.Small(f'{name} (ID: {probe_id})', className='text-info d-block mb-1'))
+                    else:
+                        title_elements.append(html.Small(f'ID: {probe_id}', className='text-info d-block mb-1'))
+                else:
+                    # No friendly name, use original logic
+                    title_elements = [html.H6(name, className='fw-bold mb-1')]
+                    # Show probe_id if it differs from name (fixes ID mismatch issue)
+                    if probe_id and probe_id != name:
+                        title_elements.append(html.Small(f'ID: {probe_id}', className='text-info d-block mb-1'))
 
                 card = dbc.Col(dbc.Card(dbc.CardBody([
                     *title_elements,
