@@ -1,7 +1,0 @@
-body { font-family: 'Inter', sans-serif; }
-.navbar-brand { letter-spacing: 0.5px; }
-.card { border-radius: 0.75rem; box-shadow: 0 2px 6px rgba(0,0,0,0.15); }
-.btn-primary { background-color: #198754; border: none; }
-.btn-primary:hover { background-color: #157347; }
-.text-info { color: #00bcd4 !important; }
-html, body, .container-fluid { background-color: #101214; color: #f8f9fa; }
